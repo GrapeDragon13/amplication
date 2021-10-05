@@ -1,50 +1,46 @@
-# Use node 14.15.1 as the base image
-FROM node@sha256:bac289a6f393990e759c672d5f567553c697255d1fb858e2c62d086a2dfae44a AS node
-FROM node
+# By default, use node 14.15.3 as the base image
+FROM node:14-alpine as builder
 
-FROM node as base
+# Define how verbose should npm install be
+ARG NPM_LOG_LEVEL=silent
+# Hide Open Collective message from install logs
+ENV OPENCOLLECTIVE_HIDE=1
+# Hiden NPM security message from install logs
+ENV NPM_CONFIG_AUDIT=false
+# Hide NPM funding message from install logs
+ENV NPM_CONFIG_FUND=false
+
+# Update npm to version 7
 RUN npm i -g npm@7.3.0
 
-FROM base as package-sources
-ARG NPM_LOG_LEVEL=silent
-RUN mkdir /app
-COPY lerna.json /app/
-COPY package*.json /app/
-COPY packages packages
-RUN cp --parents packages/*/package*.json /app/
+# Set the working direcotry
 WORKDIR /app
-RUN npm ci --loglevel=${NPM_LOG_LEVEL} --production
 
-FROM package-sources AS build
-ARG NPM_LOG_LEVEL=silent
+# Copy files specifiying dependencies
+COPY server/package.json server/package-lock.json ./server/
+COPY admin-ui/package.json admin-ui/package-lock.json ./admin-ui/
 
-ENV OPENCOLLECTIVE_HIDE=1
+# Install dependencies
+RUN cd server; npm ci --loglevel=$NPM_LOG_LEVEL;
+RUN cd admin-ui; npm ci --loglevel=$NPM_LOG_LEVEL;
 
-RUN npm run bootstrap -- --loglevel=${NPM_LOG_LEVEL} --scope @amplication/server --scope @amplication/client --include-dependencies
+# Copy Prisma schema
+COPY server/prisma/schema.prisma ./server/prisma/
 
-COPY packages packages
+# Generate Prisma client
+RUN cd server; npm run prisma:generate;
 
-RUN npm run prisma:generate
-RUN npm run build -- --scope @amplication/server --scope @amplication/client --include-dependencies
-RUN npm run clean -- --yes
+# Copy all the files
+COPY . .
 
-FROM package-sources
+# Build code
+RUN set -e; (cd server; npm run build) & (cd admin-ui; npm run build)
 
-ENV OPENCOLLECTIVE_HIDE=1
-
+# Expose the port the server listens to
 EXPOSE 3000
 
-RUN npm ci --production --silent
-RUN npm run bootstrap -- -- --production --loglevel=silent --scope @amplication/server --scope @amplication/client --include-dependencies
+# Make server to serve admin built files
+ENV SERVE_STATIC_ROOT_PATH=admin-ui/build
 
-COPY --from=build /app/packages /app/packages
-RUN npm run prisma:generate
-
-# Copy entrypoint script
-COPY docker-entrypoint.sh /entrypoint.sh
-# Give entrypoint script access permission
-RUN chmod 755 /entrypoint.sh
-
-ENTRYPOINT [ "/entrypoint.sh" ]
-
-CMD [ "node", "packages/amplication-server/dist/src/main"]
+# Run server
+CMD [ "node", "server/dist/main"]
